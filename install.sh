@@ -1,43 +1,38 @@
 #!/bin/sh
-# Installs or removes the relay LaunchAgent on the Mac the phones plug into.
+# Installs or removes the bridge LaunchDaemon on the Mac the phones plug into.
 # Usage: install.sh <ssh-host> [uninstall]
+# Both actions ask for that Mac's sudo password.
 set -eu
 
 host="${1:?usage: install.sh <ssh-host> [uninstall]}"
 action="${2:-install}"
-label="me.jiaxin.iphone-relay"
+label="me.jiaxin.iphone-bridge"
+script="/usr/local/libexec/iphone-bridge.py"
+plist="/Library/LaunchDaemons/$label.plist"
+log="/var/log/iphone-bridge.log"
 source_dir="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "$action" = "uninstall" ]; then
-    ssh "$host" "launchctl bootout gui/\$(id -u)/$label 2>/dev/null || true
-        rm -f ~/Library/LaunchAgents/$label.plist
-        rm -rf ~/.local/share/iphone-relay
-        rm -f ~/Library/Logs/iphone-relay.log"
+    ssh -t "$host" "sudo sh -c '
+        launchctl bootout system/$label 2>/dev/null
+        rm -f $plist $script $log
+        ifconfig bridge200 destroy 2>/dev/null
+        for member in \$(ifconfig bridge0 2>/dev/null | grep -o member:.en[0-9]* | cut -c9-); do
+            ifconfig -v \$member | grep -q USB.Ethernet && ifconfig bridge0 deletem \$member
+        done
+        true'"
     echo "removed from $host"
     exit 0
 fi
 
-ssh "$host" 'mkdir -p ~/.local/share/iphone-relay ~/Library/LaunchAgents'
-scp -q "$source_dir/iphone_relay.py" "$host:.local/share/iphone-relay/iphone_relay.py"
-ssh "$host" "cat > ~/Library/LaunchAgents/$label.plist <<PLIST
-<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>Label</key><string>$label</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/bin/python3</string>
-        <string>-u</string>
-        <string>\$HOME/.local/share/iphone-relay/iphone_relay.py</string>
-    </array>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>\$HOME/Library/Logs/iphone-relay.log</string>
-    <key>StandardErrorPath</key><string>\$HOME/Library/Logs/iphone-relay.log</string>
-</dict>
-</plist>
-PLIST
-launchctl bootout gui/\$(id -u)/$label 2>/dev/null || true
-launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/$label.plist"
+staging="$(ssh "$host" mktemp -d)"
+trap 'ssh "$host" rm -rf "$staging"' EXIT
+scp -q "$source_dir/iphone_bridge.py" "$source_dir/$label.plist" "$host:$staging/"
+ssh -t "$host" "sudo sh -c '
+    set -e
+    mkdir -p /usr/local/libexec
+    install -o root -g wheel -m 755 $staging/iphone_bridge.py $script
+    install -o root -g wheel -m 644 $staging/$label.plist $plist
+    launchctl bootout system/$label 2>/dev/null || true
+    launchctl bootstrap system $plist'"
 echo "installed on $host"
